@@ -9,6 +9,10 @@ import pyperclip
 import subprocess
 from selenium.common.exceptions import WebDriverException
 from selenium.common.exceptions import TimeoutException
+from selenium.common.exceptions import (
+    NoSuchElementException, TimeoutException, WebDriverException,
+    ElementClickInterceptedException, StaleElementReferenceException
+)
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.by import By
@@ -22,10 +26,11 @@ from appLog import log
 try:
     log.info("browserCTRL start to dl")
     chromedriver_autoinstaller.install()
-except:
-    log.exception("")
+except Exception as e:
+    log.exception(f"Error during chromedriver_autoinstaller.install(): {e}")
 CHROME = 1
 FIREFOX = 2
+WAIT_TIMEOUT = 15
 
 
 class Web(QThread):
@@ -52,10 +57,10 @@ class Web(QThread):
         self.remember = Remember
         self.isRunning = True
         try:
-            if not os.path.exists('./temp/cache'):
-                os.makedirs('temp/cache/')
-        except:
-            os.makedirs('./temp/cache/')
+            # exist_ok=True prevents error if directory already exists
+            os.makedirs('./temp/cache/', exist_ok=True)
+        except OSError as e:
+            log.error(f"__init__: Error creating ./temp/cache/ directory: {e}")
         # Save Session Section
         self.__platform = platform.system().lower()
         if self.__platform != 'windows' and self.__platform != 'linux':
@@ -82,24 +87,30 @@ class Web(QThread):
             try:
                 self.__driver = webdriver.Chrome(options=option, service=self.service)
                 log.debug("webDriver")
-            except:
-                log.exception("error remeber")
+            except WebDriverException as e:
+                log.warning(f"WebDriverException during initial Chrome setup with user data dir: {e}. Trying without user data dir.")
                 self.__driver = webdriver.Chrome(service=self.service)
-        except:
-            log.exception("Chrome ->:")
+        except WebDriverException as e:
+            log.error(f"WebDriverException setting up Chrome: {e}. Attempting Firefox.")
             # if not os.path.exists('temp/F.Options'):
             #     os.mkdir('temp/F.Options')
             # optionsF = webdriver.FirefoxOptions()
             # optionsF.add_argument('-headless')  ## hidden Browser
             try:
                 self.__driver = webdriver.Firefox()
-            except:
-                pass
-        try:
-            self.__driver.set_window_position(0, 0)
-            self.__driver.set_window_size(1080, 840)
-        except:
-            pass
+            except WebDriverException as e_firefox:
+                log.critical(f"WebDriverException setting up Firefox as fallback: {e_firefox}. Driver not initialized.")
+                self.__driver = None # Ensure driver is None if all attempts fail
+        except Exception as e:
+            log.exception(f"Unexpected error in driverBk Chrome setup: {e}")
+            self.__driver = None # Ensure driver is None if all attempts fail
+
+        if self.__driver: # Only proceed if driver was initialized
+            try:
+                self.__driver.set_window_position(0, 0)
+                self.__driver.set_window_size(1080, 840)
+            except WebDriverException as e:
+                log.warning(f"Error setting window size/position: {e}")
 
     def is_logged_in(self):
         status = self.__driver.execute_script(
@@ -119,282 +130,489 @@ class Web(QThread):
             pyperclip.copy(text)
 
     def ANALYZ(self):
+        log.debug("ANALYZ method started.")
+        analysis_completed_successfully = False
         try:
-            log.debug("analyz")
             if self.remember:
-                log.debug("remember")
+                log.debug("ANALYZ: remember is True. Checking cache.")
                 cacheList = os.listdir('temp/cache/')
                 if len(cacheList) != 0:
+                    # TODO: Consider adding try-except for access_by_file if it can fail
                     self.access_by_file(f"./temp/cache/{cacheList[0]}")
-                    log.debug('recover')
+                    log.debug('ANALYZ: Session recovered from cache.')
                 else:
+                    log.debug("ANALYZ: Cache empty. Initializing new browser session.")
                     self.driverBk()
+                    if not self.__driver: # driverBk failed
+                        log.critical("ANALYZ: WebDriver not initialized by driverBk.")
+                        self.EndWork.emit("-- Analysis failed: Browser could not start --")
+                        return # self.isRunning will be handled by finally
                     self.__driver.get(self.__URL)
             else:
-                log.debug("! remember !")
+                log.debug("ANALYZ: remember is False. Initializing new browser session.")
                 self.driverBk()
+                if not self.__driver: # driverBk failed
+                    log.critical("ANALYZ: WebDriver not initialized by driverBk.")
+                    self.EndWork.emit("-- Analysis failed: Browser could not start --")
+                    return # self.isRunning will be handled by finally
                 self.__driver.get(self.__URL)
 
-            while True:
-                log.debug("Login Check")
-                time.sleep(1)
-                if self.is_logged_in():
-                    log.debug("login")
-                    logtxt = "Login Success"
-                    self.LogBox.emit(logtxt)
-                    break
-            log.debug("thread:", self.counter_start)
+            log.debug(f"ANALYZ: Waiting for login. Step: {self.step}")
+            try:
+                WebDriverWait(self.__driver, 60).until(
+                    lambda driver: driver.execute_script(
+                        "return document.querySelector('*[data-icon=new-chat-outline]') !== null;"
+                    )
+                )
+                log.info("ANALYZ: Login successful.")
+                self.LogBox.emit("Login Success")
+            except TimeoutException:
+                log.error(f"ANALYZ: Login timeout: Could not detect WhatsApp Web main interface for step {self.step}.")
+                self.EndWork.emit(f"-- Analysis failed: Login timeout --") # step variable might not be 'ANALYZ'
+                # self.stop() is called in finally
+                return
+
+            log.debug(f"ANALYZ: Processing numbers. Counter start: {self.counter_start}")
             i = 0
             f = 0
             nf = 0
-            for num in self.Numbers:
+            for num_idx, num in enumerate(self.Numbers):
                 logtxt = ""
                 try:
-                    time.sleep(3)
-                    if i == 0:
-                        execu = f"""
-                                var a = document.createElement('a');
-                                var link = document.createTextNode("hiding");
-                                a.appendChild(link);
-                                a.href = "https://wa.me/{num}";
-                                document.head.appendChild(a);
+                    # time.sleep(random.randint(self.sleepMin, self.sleepMax) if self.sleepMin < self.sleepMax else self.sleepMin) # Moved later
+
+                    target_url = f"https.wa.me/{num}"
+                    link_xpath = "/html/head/a[@id='whatsappLink']" # More specific XPath with ID
+
+                    if num_idx == 0:
+                        execu_create = f"""
+                                var whatsappLink = document.createElement('a');
+                                whatsappLink.id = 'whatsappLink';
+                                whatsappLink.href = "{target_url}";
+                                document.head.appendChild(whatsappLink);
+                                // whatsappLink.click(); // Click will be handled by WebDriver explicit wait logic
                                 """
-                        try:
-                            self.__driver.execute_script(execu)
-                        except:
-                            log.exception("error")
-                    else:
-                        element = self.__driver.find_element(By.XPATH, '/html/head/a')
-                        self.__driver.execute_script(f"arguments[0].setAttribute('href','https://wa.me/{num}');",
-                                                     element)
-                    user = self.__driver.find_element(By.XPATH, '/html/head/a')
-                    self.__driver.execute_script("arguments[0].click();", user)
-                    time.sleep(2)
+                        self.__driver.execute_script(execu_create)
+
+                    # Wait for and interact with the link
+                    user_element = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                        EC.presence_of_element_located((By.XPATH, link_xpath))
+                    )
+                    self.__driver.execute_script(f"arguments[0].setAttribute('href','{target_url}');", user_element)
+                    self.__driver.execute_script("arguments[0].click();", user_element)
+
+                    # Wait for page to indicate invalid number or load chat interface (using previous lambda)
+                    # The lambda wait here is a bit broad, but specific elements for "invalid" are not easily available
+                    WebDriverWait(self.__driver, WAIT_TIMEOUT).until( # Using WAIT_TIMEOUT
+                        lambda d: "Phone number shared via url is invalid" in d.page_source or \
+                                  d.find_elements(By.XPATH, '//div[@title="Type a message"]') # Check for presence
+                    )
+                    time.sleep(1.5) # Reduced sleep, allow page source to update after dynamic content load
                     sourceWeb = self.__driver.page_source
+
                     if "Phone number shared via url is invalid" in sourceWeb:
-                        log.debug(f"Not Found {num}")
+                        log.info(f"ANALYZ: Number {num} is invalid.")
                         nf += 1
                         self.lcdNumber_nwa.emit(nf)
-                        logtxt = f"Number::{num} => Not Find!"
+                        logtxt = f"Number::{num} => Invalid"
                         self.nwa.emit(f"{num}")
                     else:
-                        log.debug("find", num)
+                        # Check if chat is actually open (presence of message box)
+                        # Check if chat is actually open (presence of message box)
+                        # This explicit wait for the message box is more reliable
+                        WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                            EC.presence_of_element_located((By.XPATH, '//div[@title="Type a message"]'))
+                        )
+                        log.info(f"ANALYZ: Number {num} is valid.")
                         f += 1
                         self.lcdNumber_wa.emit(f)
-                        logtxt = f"Number::{num} => Find."
+                        logtxt = f"Number::{num} => Valid"
                         self.wa.emit(f"{num}")
-                except:
-                    logtxt = f"Number::{num} Error !"
-                    continue
+
+                    # Pause between processing numbers, consistent with SendTEXT & SendIMG
+                    time.sleep(random.randint(self.sleepMin, self.sleepMax) if self.sleepMin < self.sleepMax else self.sleepMin)
+
+                except TimeoutException as e: # More specific Timeout handling for this number
+                    log.error(f"ANALYZ: Timeout error processing number {num}: {e}")
+                    logtxt = f"Number::{num} => Timeout Error!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except (NoSuchElementException, StaleElementReferenceException) as e: # Grouped Selenium locators/state errors
+                    log.error(f"ANALYZ: Selenium element error processing number {num}: {e}")
+                    logtxt = f"Number::{num} => Selenium Element Error!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except WebDriverException as e:
+                    log.error(f"ANALYZ: WebDriver error processing number {num}: {e}") # Keep this for other WebDriver issues
+                    logtxt = f"Number::{num} => WebDriver Error!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except Exception as e:
+                    log.exception(f"ANALYZ: Unexpected error processing number {num}: {e}")
+                    logtxt = f"Number::{num} => Unexpected Error!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
                 finally:
                     i += 1
-                    log.debug(i)
                     self.lcdNumber_reviewed.emit(i)
-                    self.LogBox.emit(logtxt)
-            time.sleep(2)
-            log.debug("end")
-            self.EndWork.emit("-- analysis completed --")
+                    if logtxt: # Avoid emitting empty log messages
+                        self.LogBox.emit(logtxt)
+
+            analysis_completed_successfully = True # Mark as successful if loop completes
+
+        except WebDriverException as e:
+            log.critical(f"ANALYZ: Fatal WebDriverException: {e}")
+            self.EndWork.emit("-- Analysis failed: Browser session error --")
+        except Exception as e:
+            log.exception(f"ANALYZ: Unexpected critical error in main process: {e}")
+            self.EndWork.emit("-- Analysis failed: Unexpected error --")
+        finally:
+            if analysis_completed_successfully:
+                log.info("ANALYZ: Analysis completed successfully.")
+                self.EndWork.emit("-- analysis completed --")
+            # If EndWork was already emitted with failure, it won't be overridden here
+            # unless analysis_completed_successfully is True, which it wouldn't be in case of prior fatal error.
+
             self.isRunning = False
-            self.__driver.quit()
-        except:
-            log.exception("Analyz ->:")
+            self.stop() # Ensure driver quits
+            log.debug("ANALYZ method finished.")
 
     def SendTEXT(self):
-        log.debug("sent text")
-        if self.remember:
-            cacheList = os.listdir('temp/cache/')
-            if len(cacheList) != 0:
-                self.access_by_file(f"./temp/cache/{cacheList[0]}")
-                log.debug('recover')
+        log.debug("SendTEXT method started.")
+        send_text_completed_successfully = False
+        try:
+            if self.remember:
+                log.debug("SendTEXT: remember is True. Checking cache.")
+                cacheList = os.listdir('temp/cache/')
+                if len(cacheList) != 0:
+                    # TODO: Consider adding try-except for access_by_file
+                    self.access_by_file(f"./temp/cache/{cacheList[0]}")
+                    log.debug('SendTEXT: Session recovered from cache.')
+                else:
+                    log.debug("SendTEXT: Cache empty. Initializing new browser session.")
+                    self.driverBk()
+                    if not self.__driver:
+                        log.critical("SendTEXT: WebDriver not initialized by driverBk.")
+                        self.EndWork.emit("-- Send Message failed: Browser could not start --")
+                        return
+                    self.__driver.get(self.__URL)
             else:
+                log.debug("SendTEXT: remember is False. Initializing new browser session.")
                 self.driverBk()
+                if not self.__driver:
+                    log.critical("SendTEXT: WebDriver not initialized by driverBk.")
+                    self.EndWork.emit("-- Send Message failed: Browser could not start --")
+                    return
                 self.__driver.get(self.__URL)
-        else:
-            self.driverBk()
-            self.__driver.get(self.__URL)
-        time.sleep(2)
-        while True:
-            time.sleep(1)
-            if self.is_logged_in():
-                log.debug("login")
-                logtxt = "Login Success"
-                self.LogBox.emit(logtxt)
-                break
-        i = 0
-        f = 0
-        nf = 0
-        from random import randint
-        log.debug(self.Numbers)
-        for num in self.Numbers:
-            logtxt = ""
+
+            log.debug(f"SendTEXT: Waiting for login. Step: {self.step}")
             try:
-                time.sleep(3)
-                if i == 0:
-                    execu = f"""
-                            var a = document.createElement('a');
-                            var link = document.createTextNode("hiding");
-                            a.appendChild(link);
-                            a.href = "https://wa.me/{num}";
-                            document.head.appendChild(a);
-                            """
-                    try:
-                        self.__driver.execute_script(execu)
-                    except:
-                        log.exception("error")
-                        logtxt = "ERROR !"
-                        break
-                else:
-                    element = self.__driver.find_element(By.XPATH, '/html/head/a')
-                    self.__driver.execute_script(
-                        f"arguments[0].setAttribute('href','https://wa.me/{num}');", element)
-                user = self.__driver.find_element(By.XPATH, '/html/head/a')
-                self.__driver.execute_script("arguments[0].click();", user)
-                time.sleep(2)
-                sourceWeb = self.__driver.page_source
-                if "Phone number shared via url is invalid" in sourceWeb:
-                    log.debug(f"Not Found {num}")
-                    nf += 1
-                    self.lcdNumber_nwa.emit(nf)
-                    logtxt = f"Number::{num} => No Send!"
-                    self.nwa.emit(f"{num}")
-                else:
-                    log.debug("find", num)
-                    time.sleep(2)
-                    textBox = self.__driver.find_element(By.XPATH, '//div[@title="Type a message"]')
-                    time.sleep(1)
-                    self.copyToClipboard(self.text)
-                    textBox.send_keys(Keys.CONTROL, 'v')
-                    time.sleep(1)
-                    try:
+                WebDriverWait(self.__driver, 60).until(
+                    lambda driver: driver.execute_script(
+                        "return document.querySelector('*[data-icon=new-chat-outline]') !== null;"
+                    )
+                )
+                log.info("SendTEXT: Login successful.")
+                self.LogBox.emit("Login Success")
+            except TimeoutException:
+                log.error(f"SendTEXT: Login timeout: Could not detect WhatsApp Web main interface for step {self.step}.")
+                self.EndWork.emit(f"-- Send Message failed: Login timeout --") # step variable might not be 'SendTEXT'
+                # self.stop() is called in finally
+                return
+
+            i = 0
+            f = 0
+            nf = 0
+            log.debug(f"SendTEXT: Processing numbers: {self.Numbers}")
+            for num_idx, num in enumerate(self.Numbers):
+                logtxt = ""
+                try:
+                    target_url = f"https.wa.me/{num}"
+                    link_xpath = "/html/head/a[@id='whatsappLink']"
+
+                    if num_idx == 0:
+                        execu_create = f"""
+                                var whatsappLink = document.createElement('a');
+                                whatsappLink.id = 'whatsappLink';
+                                whatsappLink.href = "{target_url}";
+                                document.head.appendChild(whatsappLink);
+                                """
+                        self.__driver.execute_script(execu_create)
+
+                    user_element = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                        EC.presence_of_element_located((By.XPATH, link_xpath))
+                    )
+                    self.__driver.execute_script(f"arguments[0].setAttribute('href','{target_url}');", user_element)
+                    self.__driver.execute_script("arguments[0].click();", user_element)
+
+                    WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                        lambda d: "Phone number shared via url is invalid" in d.page_source or \
+                                  d.find_elements(By.XPATH, '//div[@title="Type a message"]')
+                    )
+                    time.sleep(1.5) # Reduced sleep
+                    sourceWeb = self.__driver.page_source
+
+                    if "Phone number shared via url is invalid" in sourceWeb:
+                        log.info(f"SendTEXT: Number {num} is invalid. Not sending.")
+                        nf += 1
+                        self.lcdNumber_nwa.emit(nf)
+                        logtxt = f"Number::{num} => Invalid (No Send)"
+                        self.nwa.emit(f"{num}")
+                    else:
+                        log.info(f"SendTEXT: Number {num} is valid. Attempting to send message.")
+                        textBox = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                            EC.element_to_be_clickable((By.XPATH, '//div[@title="Type a message"]')) # Ensure clickable
+                        )
+                        # self.copyToClipboard(self.text) # Done outside try block if it doesn't involve driver
+                        textBox.send_keys(Keys.CONTROL, 'v') # Consider sending char by char if this fails
+                        time.sleep(0.5)
                         textBox.send_keys(Keys.RETURN)
-                    except Exception:
-                        textBox.send_keys(Keys.ENTER)
-                    time.sleep(1)
-                    f += 1
-                    self.lcdNumber_wa.emit(f)
-                    logtxt = f"Number::{num} => Sent."
-                    self.wa.emit(f"{num}")
-                time.sleep(randint(self.sleepMin, self.sleepMax))
-            except:
-                logtxt = f"Error To Number = {num} "
-                continue
-            finally:
-                i += 1
-                self.lcdNumber_reviewed.emit(i)
-                self.LogBox.emit(logtxt)
-        log.debug("end msg")
-        self.EndWork.emit("-- Send Message completed --")
-        self.stop()
-        self.isRunning = False
+                        time.sleep(1)
+
+                        f += 1
+                        self.lcdNumber_wa.emit(f)
+                        logtxt = f"Number::{num} => Sent."
+                        self.wa.emit(f"{num}")
+
+                    time.sleep(random.randint(self.sleepMin, self.sleepMax) if self.sleepMin < self.sleepMax else self.sleepMin)
+
+                except TimeoutException as e: # Specific to this number's operations
+                    log.error(f"SendTEXT: Timeout error for number {num}: {e}")
+                    logtxt = f"Number::{num} => Timeout Error (No Send)!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except (NoSuchElementException, StaleElementReferenceException, ElementClickInterceptedException) as e:
+                    log.error(f"SendTEXT: Selenium element error for number {num}: {e}")
+                    logtxt = f"Number::{num} => Selenium Error (No Send)!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except WebDriverException as e:
+                    log.error(f"SendTEXT: WebDriver error for number {num}: {e}")
+                    logtxt = f"Number::{num} => WebDriver Error (No Send)!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except Exception as e:
+                    log.exception(f"SendTEXT: Unexpected error for number {num}: {e}")
+                    logtxt = f"Number::{num} => Unexpected Error (No Send)!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                finally:
+                    i += 1
+                    self.lcdNumber_reviewed.emit(i)
+                    if logtxt:
+                        self.LogBox.emit(logtxt)
+
+            send_text_completed_successfully = True
+
+        except WebDriverException as e:
+            log.critical(f"SendTEXT: Fatal WebDriverException: {e}")
+            self.EndWork.emit("-- Send Message failed: Browser session error --")
+        except Exception as e:
+            log.exception(f"SendTEXT: Unexpected critical error: {e}")
+            self.EndWork.emit("-- Send Message failed: Unexpected error --")
+        finally:
+            if send_text_completed_successfully:
+                log.info("SendTEXT: Message sending process completed.")
+                self.EndWork.emit("-- Send Message completed --")
+
+            self.isRunning = False
+            self.stop()
+            log.debug("SendTEXT method finished.")
 
     def SendIMG(self):
-        log.debug("sent img")
-        if self.remember:
-            cacheList = os.listdir('temp/cache/')
-            if len(cacheList) != 0:
-                self.access_by_file(f"./temp/cache/{cacheList[0]}")
-                log.debug('recover')
+        log.debug("SendIMG method started.")
+        send_img_completed_successfully = False
+        try:
+            if self.remember:
+                log.debug("SendIMG: remember is True. Checking cache.")
+                cacheList = os.listdir('temp/cache/')
+                if len(cacheList) != 0:
+                    # TODO: Consider adding try-except for access_by_file
+                    self.access_by_file(f"./temp/cache/{cacheList[0]}")
+                    log.debug('SendIMG: Session recovered from cache.')
+                else:
+                    log.debug("SendIMG: Cache empty. Initializing new browser session.")
+                    self.driverBk()
+                    if not self.__driver:
+                        log.critical("SendIMG: WebDriver not initialized by driverBk.")
+                        self.EndWork.emit("-- Send Image failed: Browser could not start --")
+                        return
+                    self.__driver.get(self.__URL)
             else:
+                log.debug("SendIMG: remember is False. Initializing new browser session.")
                 self.driverBk()
+                if not self.__driver:
+                    log.critical("SendIMG: WebDriver not initialized by driverBk.")
+                    self.EndWork.emit("-- Send Image failed: Browser could not start --")
+                    return
                 self.__driver.get(self.__URL)
-        else:
-            self.driverBk()
-            self.__driver.get(self.__URL)
-        time.sleep(2)
-        while True:
-            time.sleep(1)
-            if self.is_logged_in():
-                log.debug("login")
-                logtxt = "Login Success"
-                self.LogBox.emit(logtxt)
-                break
-        i = 0
-        f = 0
-        nf = 0
-        from random import randint
-        log.debug(self.Numbers)
-        for num in self.Numbers:
-            logtxt = ""
+
+            log.debug(f"SendIMG: Waiting for login. Step: {self.step}")
             try:
-                time.sleep(3)
-                if i == 0:
-                    execu = f"""
-                            var a = document.createElement('a');
-                            var link = document.createTextNode("hiding");
-                            a.appendChild(link);
-                            a.href = "https://wa.me/{num}";
-                            document.head.appendChild(a);
-                            """
-                    try:
-                        self.__driver.execute_script(execu)
-                    except:
-                        log.exception("error img")
-                        logtxt = "ERROR !"
-                        break
-                else:
-                    element = self.__driver.find_element(By.XPATH, '/html/head/a')
-                    self.__driver.execute_script(f"arguments[0].setAttribute('href','https://wa.me/{num}');", element)
-                user = self.__driver.find_element(By.XPATH, '/html/head/a')
-                self.__driver.execute_script("arguments[0].click();", user)
-                time.sleep(2)
-                sourceWeb = self.__driver.page_source
-                if "Phone number shared via url is invalid" in sourceWeb:
-                    log.debug(f"Not Found {num}")
-                    nf += 1
-                    self.lcdNumber_nwa.emit(nf)
-                    logtxt = f"Number::{num} => No Send"
-                    self.nwa.emit(f"{num}")
-                else:
-                    log.debug("find", num)
-                    time.sleep(2)
-                    self.__driver.find_element(By.XPATH, '//span[@data-icon="attach-menu-plus"]').click()
-                    time.sleep(2)
-                    attch = self.__driver.find_element(By.XPATH,
-                                                       '//input[@accept="image/*,video/mp4,video/3gpp,video/quicktime"]')
-                    attch.send_keys(self.path)
-                    time.sleep(2)
-                    caption = self.__driver.find_element(
-                        By.XPATH, '//div[@role="textbox"]')
-                    if self.text != '' or self.text != ' ':
-                        self.copyToClipboard(self.text)
-                        caption.send_keys(Keys.CONTROL, 'v')
-                        time.sleep(1)
-                    try:
-                        caption.send_keys(Keys.RETURN)
-                    except Exception:
-                        caption.send_keys(Keys.ENTER)
-                    f += 1
-                    self.lcdNumber_wa.emit(f)
-                    logtxt = f"Number::{num} => Sent"
-                    self.wa.emit(f"{num}")
-                time.sleep(randint(self.sleepMin, self.sleepMax))
-            except:
-                logtxt = f"Error To Number = {num} "
-                log.exception("Error sendIMG")
-                continue
-            finally:
-                i += 1
-                self.lcdNumber_reviewed.emit(i)
-                self.LogBox.emit(logtxt)
-        self.EndWork.emit("-- Send Image completed --")
-        self.stop()
-        self.isRunning = False
+                WebDriverWait(self.__driver, 60).until(
+                    lambda driver: driver.execute_script(
+                        "return document.querySelector('*[data-icon=new-chat-outline]') !== null;"
+                    )
+                )
+                log.info("SendIMG: Login successful.")
+                self.LogBox.emit("Login Success")
+            except TimeoutException:
+                log.error(f"SendIMG: Login timeout: Could not detect WhatsApp Web main interface for step {self.step}.")
+                self.EndWork.emit(f"-- Send Image failed: Login timeout --") # step variable might not be 'SendIMG'
+                # self.stop() is called in finally
+                return
+
+            i = 0
+            f = 0
+            nf = 0
+            log.debug(f"SendIMG: Processing numbers: {self.Numbers}")
+            for num_idx, num in enumerate(self.Numbers):
+                logtxt = ""
+                try:
+                    target_url = f"https.wa.me/{num}"
+                    link_xpath = "/html/head/a[@id='whatsappLink']"
+
+                    if num_idx == 0:
+                        execu_create = f"""
+                                var whatsappLink = document.createElement('a');
+                                whatsappLink.id = 'whatsappLink';
+                                whatsappLink.href = "{target_url}";
+                                document.head.appendChild(whatsappLink);
+                                """
+                        self.__driver.execute_script(execu_create)
+
+                    user_element = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                        EC.presence_of_element_located((By.XPATH, link_xpath))
+                    )
+                    self.__driver.execute_script(f"arguments[0].setAttribute('href','{target_url}');", user_element)
+                    self.__driver.execute_script("arguments[0].click();", user_element)
+
+                    WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                        lambda d: "Phone number shared via url is invalid" in d.page_source or \
+                                  d.find_elements(By.XPATH, '//div[@title="Type a message"]')
+                    )
+                    time.sleep(1.5) # Reduced sleep
+                    sourceWeb = self.__driver.page_source
+
+                    if "Phone number shared via url is invalid" in sourceWeb:
+                        log.info(f"SendIMG: Number {num} is invalid. Not sending image.")
+                        nf += 1
+                        self.lcdNumber_nwa.emit(nf)
+                        logtxt = f"Number::{num} => Invalid (No Send)"
+                        self.nwa.emit(f"{num}")
+                    else:
+                        log.info(f"SendIMG: Number {num} is valid. Attempting to send image.")
+                        attach_button = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                            EC.element_to_be_clickable((By.XPATH, '//span[@data-icon="attach-menu-plus"]'))
+                        )
+                        attach_button.click()
+
+                        file_input_xpath = '//input[@accept="image/*,video/mp4,video/3gpp,video/quicktime"]'
+                        file_input = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                            EC.presence_of_element_located((By.XPATH, file_input_xpath))
+                        )
+                        file_input.send_keys(self.path)
+
+                        # Adjusted XPath for caption box, often it's a div with role="textbox"
+                        # This might need further refinement based on actual WhatsApp Web structure during image send
+                        caption_textbox_xpath = '//div[@role="textbox"][contains(@class,"selectable-text")]'
+                        caption_textbox = WebDriverWait(self.__driver, WAIT_TIMEOUT).until( # Increased wait for upload
+                            EC.element_to_be_clickable((By.XPATH, caption_textbox_xpath))
+                        )
+
+                        if self.text.strip():
+                            # self.copyToClipboard(self.text) # Done outside try block if it doesn't involve driver
+                            caption_textbox.send_keys(Keys.CONTROL, 'v')
+                            time.sleep(0.5)
+
+                        caption_textbox.send_keys(Keys.RETURN)
+                        time.sleep(2)
+
+                        f += 1
+                        self.lcdNumber_wa.emit(f)
+                        logtxt = f"Number::{num} => Image Sent."
+                        self.wa.emit(f"{num}")
+
+                    time.sleep(random.randint(self.sleepMin, self.sleepMax) if self.sleepMin < self.sleepMax else self.sleepMin)
+
+                except TimeoutException as e: # Specific to this number's operations
+                    log.error(f"SendIMG: Timeout error for image to {num}: {e}")
+                    logtxt = f"Number::{num} => Timeout Error (No Send)!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except (NoSuchElementException, StaleElementReferenceException, ElementClickInterceptedException) as e:
+                    log.error(f"SendIMG: Selenium element error for image to {num}: {e}")
+                    logtxt = f"Number::{num} => Selenium Error (No Send)!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except WebDriverException as e:
+                    log.error(f"SendIMG: WebDriver error for image to {num}: {e}")
+                    logtxt = f"Number::{num} => WebDriver Error (No Send)!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                except Exception as e:
+                    log.exception(f"SendIMG: Unexpected error for image to {num}: {e}")
+                    logtxt = f"Number::{num} => Unexpected Error (No Send)!"
+                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                finally:
+                    i += 1
+                    self.lcdNumber_reviewed.emit(i)
+                    if logtxt:
+                        self.LogBox.emit(logtxt)
+
+            send_img_completed_successfully = True
+
+        except WebDriverException as e:
+            log.critical(f"SendIMG: Fatal WebDriverException: {e}")
+            self.EndWork.emit("-- Send Image failed: Browser session error --")
+        except Exception as e:
+            log.exception(f"SendIMG: Unexpected critical error: {e}")
+            self.EndWork.emit("-- Send Image failed: Unexpected error --")
+        finally:
+            if send_img_completed_successfully:
+                log.info("SendIMG: Image sending process completed.")
+                self.EndWork.emit("-- Send Image completed --")
+
+            self.isRunning = False
+            self.stop()
+            log.debug("SendIMG method finished.")
 
     def addAcc(self):
+        log.debug("addAcc method started.")
+        account_added_successfully = False
         try:
-            log.debug("Add Account")
             if self.remember:
-                if self.path == '':
+                if not self.path: # Check if path is empty or None
                     cacheName = str(random.randint(1, 9999999))
                     self.path = cacheName
-                self.save_profile(self.get_active_session(),
-                                  f"./temp/cache/{self.path}")
-                log.debug('File saved.')
-            log.debug("thread:", self.counter_start)
-            self.EndWork.emit("-- Add Account completed --")
+
+                active_session = self.get_active_session() # This might involve browser interaction
+                if active_session: # Ensure session was retrieved
+                    self.save_profile(active_session, f"./temp/cache/{self.path}")
+                    log.info(f"addAcc: Profile saved to ./temp/cache/{self.path}")
+                    account_added_successfully = True
+                else:
+                    log.error("addAcc: Could not get active session to save.")
+            else:
+                log.info("addAcc: 'Remember me' is not checked. No account profile saved.")
+                # It's debatable if this is a success or not, but the operation as defined (not saving) completed.
+                # For clarity, let's assume "completed" means no errors, even if nothing was saved.
+                account_added_successfully = True
+
+            log.debug(f"addAcc: Counter start value: {self.counter_start}")
+
+        except (IOError, OSError) as e:
+            log.error(f"addAcc: File saving/IO error: {e}")
+            self.EndWork.emit("-- Add Account failed: File error --")
+        except WebDriverException as e: # If get_active_session caused a browser issue
+            log.critical(f"addAcc: WebDriverException during account addition: {e}")
+            self.EndWork.emit("-- Add Account failed: Browser error --")
+        except Exception as e:
+            log.exception(f"addAcc: Unexpected error: {e}")
+            self.EndWork.emit("-- Add Account failed: Unexpected error --")
+        finally:
+            if account_added_successfully and self.remember: # Only emit success if we intended to save and did
+                 self.EndWork.emit("-- Add Account completed --")
+            elif account_added_successfully and not self.remember:
+                 self.EndWork.emit("-- Add Account skipped (Remember Me unchecked) --")
+            # else an error message would have been emitted by except blocks.
+
             self.isRunning = False
-        except:
-            log.exception("Add Account ->:")
+            # self.stop() # Call stop if a browser instance might be lingering from get_active_session
+            # get_active_session internally calls self.__driver.quit(), so stop() here might be redundant
+            # or try to quit an already quit driver. Let's be cautious.
+            # If get_active_session guarantees cleanup, explicit stop here is not needed.
+            # For now, assume get_active_session cleans up its own driver instance if it creates one.
+            log.debug("addAcc method finished.")
 
     def run(self):
         while self.isRunning == True:
@@ -408,54 +626,86 @@ class Web(QThread):
                 self.addAcc()
 
     def stop(self):
-        self.isRunning = False
-        log.debug('stopping thread...')
+        self.isRunning = False # Ensure isRunning is set to False
+        log.debug('stop: Attempting to stop thread and quit WebDriver...')
         try:
-            self.__driver.quit()
-        except:
-            pass
-        # self.terminate()
+            if self.__driver:
+                self.__driver.quit()
+                log.info("stop: WebDriver quit successfully.")
+        except WebDriverException as e:
+            log.warning(f"stop: WebDriverException during driver.quit(): {e}")
+        except Exception as e:
+            log.exception(f"stop: Unexpected error during driver.quit(): {e}")
+        # self.terminate() # Generally avoid terminate, prefer graceful shutdown.
 
     def __init_browser(self):
-        if self.__browser_choice == CHROME:
-            self.__browser_options = webdriver.ChromeOptions()
+        try:
+            if self.__browser_choice == CHROME:
+                self.__browser_options = webdriver.ChromeOptions()
+                if self.__platform == 'windows':
+                    self.__browser_user_dir = os.path.join(os.environ['USERPROFILE'],
+                                                           'Appdata', 'Local', 'Google', 'Chrome', 'User Data')
+                elif self.__platform == 'linux':
+                    self.__browser_user_dir = os.path.join(os.environ['HOME'], '.config', 'google-chrome')
+                else: # Should have been caught by init, but defensive
+                    log.error("__init_browser: Unsupported platform for Chrome profile path.")
+                    self.__browser_user_dir = None
+            elif self.__browser_choice == FIREFOX:
+                self.__browser_options = webdriver.FirefoxOptions()
+                if self.__platform == 'windows':
+                    self.__browser_user_dir = os.path.join(os.environ['APPDATA'], 'Mozilla', 'Firefox', 'Profiles')
+                elif self.__platform == 'linux':
+                    self.__browser_user_dir = os.path.join(os.environ['HOME'], '.mozilla', 'firefox')
+                else: # Should have been caught by init, but defensive
+                    log.error("__init_browser: Unsupported platform for Firefox profile path.")
+                    self.__browser_user_dir = None
+            else:
+                log.error(f"__init_browser: Invalid browser choice: {self.__browser_choice}")
+                return
 
-            if self.__platform == 'windows':
-                self.__browser_user_dir = os.path.join(os.environ['USERPROFILE'],
-                                                       'Appdata', 'Local', 'Google', 'Chrome', 'User Data')
-            elif self.__platform == 'linux':
-                self.__browser_user_dir = os.path.join(
-                    os.environ['HOME'], '.config', 'google-chrome')
+            if self.__browser_user_dir and not os.path.isdir(self.__browser_user_dir):
+                log.warning(f"__init_browser: Browser user directory not found: {self.__browser_user_dir}. Profile features may fail.")
+                # Consider creating it or handling this more strictly if profiles are essential from the start
+                # For now, it will likely lead to an empty __browser_profile_list.
 
-        elif self.__browser_choice == FIREFOX:
-            self.__browser_options = webdriver.FirefoxOptions()
+            # self.__browser_options.headless = True # This seems to be set by default or handled elsewhere. Revisit if needed.
+            self.__refresh_profile_list()
 
-            if self.__platform == 'windows':
-                self.__browser_user_dir = os.path.join(
-                    os.environ['APPDATA'], 'Mozilla', 'Firefox', 'Profiles')
-                self.__browser_profile_list = os.listdir(
-                    self.__browser_user_dir)
-            elif self.__platform == 'linux':
-                self.__browser_user_dir = os.path.join(
-                    os.environ['HOME'], '.mozilla', 'firefox')
+        except KeyError as e: # For os.environ access
+            log.error(f"__init_browser: Environment variable not found: {e}. Profile features may be unavailable.")
+            self.__browser_user_dir = None # Cannot proceed with profile listing
+            self.__browser_profile_list = []
+        except Exception as e:
+            log.exception(f"__init_browser: Unexpected error initializing browser profile settings: {e}")
+            self.__browser_user_dir = None
+            self.__browser_profile_list = []
 
-        self.__browser_options.headless = True
-        self.__refresh_profile_list()
 
     def __refresh_profile_list(self):
+        self.__browser_profile_list = [] # Initialize to empty list
         if self.__browser_choice == CHROME:
-            self.__browser_profile_list = ['']
-            for profile_dir in os.listdir(self.__browser_user_dir):
-                if 'profile' in profile_dir.lower():
-                    if profile_dir != 'System Profile':
-                        self.__browser_profile_list.append(profile_dir)
+            self.__browser_profile_list.append('') # Default profile option
+            if self.__browser_user_dir and os.path.isdir(self.__browser_user_dir):
+                try:
+                    for profile_dir in os.listdir(self.__browser_user_dir):
+                        if 'profile' in profile_dir.lower() and profile_dir != 'System Profile':
+                            self.__browser_profile_list.append(profile_dir)
+                except OSError as e:
+                    log.error(f"__refresh_profile_list: Error reading Chrome profile directory {self.__browser_user_dir}: {e}")
+            elif not self.__browser_user_dir:
+                 log.warning("__refresh_profile_list: Chrome user directory not set. Cannot list profiles.")
         elif self.__browser_choice == FIREFOX:
-            # TODO: consider reading out the profiles.ini
-            self.__browser_profile_list = []
-            for profile_dir in os.listdir(self.__browser_user_dir):
-                if not profile_dir.endswith('.default'):
-                    if os.path.isdir(os.path.join(self.__browser_user_dir, profile_dir)):
-                        self.__browser_profile_list.append(profile_dir)
+            # TODO: consider reading out the profiles.ini for Firefox
+            if self.__browser_user_dir and os.path.isdir(self.__browser_user_dir):
+                try:
+                    for profile_dir in os.listdir(self.__browser_user_dir):
+                        if not profile_dir.endswith('.default') and \
+                           os.path.isdir(os.path.join(self.__browser_user_dir, profile_dir)):
+                            self.__browser_profile_list.append(profile_dir)
+                except OSError as e:
+                    log.error(f"__refresh_profile_list: Error reading Firefox profile directory {self.__browser_user_dir}: {e}")
+            elif not self.__browser_user_dir:
+                log.warning("__refresh_profile_list: Firefox user directory not set. Cannot list profiles.")
 
     def __get_indexed_db(self):
         self.__driver.execute_script('window.waScript = {};'
@@ -663,55 +913,106 @@ class Web(QThread):
 
     def access_by_file(self, profile_file):
         profile_file = os.path.normpath(profile_file)
-
-        if os.path.isfile(profile_file):
+        try:
             with open(profile_file, 'r') as file:
                 wa_profile_list = json.load(file)
 
             verified_wa_profile_list = False
-            for object_store_obj in wa_profile_list:
-                if 'WASecretBundle' in object_store_obj['key']:
-                    verified_wa_profile_list = True
-                    break
+            # Check if wa_profile_list is actually a list and not None, before iterating
+            if isinstance(wa_profile_list, list):
+                for object_store_obj in wa_profile_list:
+                    if isinstance(object_store_obj, dict) and 'key' in object_store_obj and \
+                       'WASecretBundle' in object_store_obj['key']:
+                        verified_wa_profile_list = True
+                        break
+
             if verified_wa_profile_list:
-                self.access_by_obj(wa_profile_list)
+                self.access_by_obj(wa_profile_list) # This method might also need error handling
             else:
-                raise ValueError('There might be multiple profiles stored in this file.'
-                                 ' Make sure you only pass one WaSession file to this method.')
-        else:
-            raise FileNotFoundError(
-                'Make sure you pass a valid WaSession file to this method.')
+                # Log instead of raising ValueError directly, or make it more specific
+                log.error(f"access_by_file: Profile data in {profile_file} is not in expected format or WASecretBundle missing.")
+                # Optionally re-raise a more specific error if needed for upstream handling
+                raise ValueError('Invalid profile data format or missing WASecretBundle.')
+
+        except FileNotFoundError:
+            log.error(f"access_by_file: Profile file not found: {profile_file}")
+            raise # Re-raise FileNotFoundError to be handled by caller if necessary
+        except json.JSONDecodeError as e:
+            log.error(f"access_by_file: Error decoding JSON from profile file {profile_file}: {e}")
+            raise # Re-raise to be handled by caller
+        except Exception as e:
+            log.exception(f"access_by_file: Unexpected error processing profile file {profile_file}: {e}")
+            raise # Re-raise for upstream handling
+
 
     def save_profile(self, wa_profile_list, file_path):
         file_path = os.path.normpath(file_path)
 
-        verified_wa_profile_list = False
-        for object_store_obj in wa_profile_list:
-            if 'key' in object_store_obj:
-                if 'WASecretBundle' in object_store_obj['key']:
-                    verified_wa_profile_list = True
-                    break
-        if verified_wa_profile_list:
-            with open(file_path, 'w') as file:
-                json.dump(wa_profile_list, file, indent=4)
-        else:
-            saved_profiles = 0
-            for profile_name in wa_profile_list.keys():
-                profile_storage = wa_profile_list[profile_name]
-                verified_wa_profile_list = False
-                for object_store_obj in profile_storage:
-                    if 'key' in object_store_obj:
-                        if 'WASecretBundle' in object_store_obj['key']:
-                            verified_wa_profile_list = True
-                            break
-                if verified_wa_profile_list:
-                    single_profile_name = os.path.basename(
-                        file_path) + '-' + profile_name
-                    self.save_profile(profile_storage, os.path.join(
-                        os.path.dirname(file_path), single_profile_name))
-                    saved_profiles += 1
-            if saved_profiles > 0:
+        try:
+            # Determine if it's a single profile list or a dict of profiles
+            is_single_profile = False
+            if isinstance(wa_profile_list, list):
+                for object_store_obj in wa_profile_list:
+                    if isinstance(object_store_obj, dict) and 'key' in object_store_obj and \
+                       'WASecretBundle' in object_store_obj['key']:
+                        is_single_profile = True
+                        break
+            elif isinstance(wa_profile_list, dict): # It's a dictionary of profiles
+                # We'll iterate through this dict later
                 pass
-            else:
-                raise ValueError(
-                    'Could not find any profiles in the list. Make sure to specified file path is correct.')
+            else: # Not a list or dict, or not the expected structure
+                log.error(f"save_profile: wa_profile_list is not a valid list or dictionary of profiles.")
+                raise ValueError('Invalid profile data provided to save_profile.')
+
+            if is_single_profile:
+                with open(file_path, 'w') as file:
+                    json.dump(wa_profile_list, file, indent=4)
+                log.info(f"save_profile: Successfully saved single profile to {file_path}")
+            else: # It's a dictionary of profiles (or should be)
+                saved_profiles_count = 0
+                if isinstance(wa_profile_list, dict):
+                    for profile_name, profile_storage in wa_profile_list.items():
+                        # Verify this specific profile_storage before saving
+                        current_profile_valid = False
+                        if isinstance(profile_storage, list):
+                            for obj_store_obj_item in profile_storage: # Renamed to avoid conflict
+                                if isinstance(obj_store_obj_item, dict) and 'key' in obj_store_obj_item and \
+                                   'WASecretBundle' in obj_store_obj_item['key']:
+                                    current_profile_valid = True
+                                    break
+
+                        if current_profile_valid:
+                            # Construct a unique filename for this profile part
+                            base_dir = os.path.dirname(file_path)
+                            base_name = os.path.basename(file_path)
+                            # Remove potential existing extensions to avoid things like file.json-profileName
+                            base_name_no_ext, _ = os.path.splitext(base_name)
+
+                            # Ensure profile_name is a string and valid for filenames
+                            safe_profile_name = str(profile_name).replace(os.sep, "_").replace(" ", "_")
+                            single_profile_filename = f"{base_name_no_ext}-{safe_profile_name}.json" # Add .json extension
+
+                            full_single_profile_path = os.path.join(base_dir, single_profile_filename)
+
+                            # Recursive call to save this individual profile
+                            self.save_profile(profile_storage, full_single_profile_path)
+                            saved_profiles_count += 1
+                        else:
+                            log.warning(f"save_profile: Profile data for '{profile_name}' in dict is invalid. Skipping.")
+
+                if saved_profiles_count > 0:
+                    log.info(f"save_profile: Successfully saved {saved_profiles_count} profiles from dictionary.")
+                else:
+                    log.warning(f"save_profile: No valid profiles found to save from the dictionary provided to path {file_path}.")
+                    # This might not be an error if the input dict was empty or all profiles were invalid
+                    # raise ValueError('Could not find any valid profiles in the dictionary to save.')
+
+        except (IOError, OSError) as e:
+            log.error(f"save_profile: Error writing profile to {file_path}: {e}")
+            raise # Re-raise to allow caller to handle
+        except ValueError as e: # Catch specific ValueErrors from this function or recursive calls
+            log.error(f"save_profile: ValueError: {e} (while processing {file_path})")
+            raise
+        except Exception as e:
+            log.exception(f"save_profile: Unexpected error while saving profile to {file_path}: {e}")
+            raise
