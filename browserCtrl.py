@@ -43,10 +43,46 @@ class Web(QThread):
     wa = pyqtSignal(str)
     nwa = pyqtSignal(str)
     EndWork = pyqtSignal(str)
+    # WAIT_TIMEOUT = 15 # This is a class attribute, accessed by self.WAIT_TIMEOUT or Web.WAIT_TIMEOUT
 
     def __init__(self, parent=None, counter_start=0, step='A', numList=None, sleepMin=3, sleepMax=6, text='', path='',
                  Remember=False, browser=1):
         super(Web, self).__init__(parent)
+
+        self.selectors = {}
+        try:
+            # browserCtrl.py is in the root, selectors.json is in src/
+            selector_file_path = os.path.join("src", "selectors.json")
+            with open(selector_file_path, "r", encoding="utf-8") as f:
+                self.selectors = json.load(f)
+            log.info(f"Successfully loaded selectors from {selector_file_path}")
+        except FileNotFoundError:
+            log.error(f"'{selector_file_path}' not found. Using hardcoded fallback selectors.")
+            self.selectors = {
+                "login_check_element": "*[data-icon=new-chat-outline]",
+                "message_textbox": "//div[@title='Type a message']", # Old selector as fallback
+                "attach_button": "//span[@data-icon='attach-menu-plus']", # Old selector
+                "media_file_input": "//input[@accept='image/*,video/mp4,video/3gpp,video/quicktime']", # Old selector
+                "media_caption_textbox": "//div[@role='textbox'][contains(@class,'selectable-text')]", # Old selector
+                "navigation_link": "/html/head/a[@id='whatsappLink']"
+            }
+            log.warning("Using hardcoded fallback selectors due to missing selectors.json.")
+        except json.JSONDecodeError as e:
+            log.error(f"Error decoding '{selector_file_path}': {e}. Using hardcoded fallback selectors.")
+            self.selectors = {
+                "login_check_element": "*[data-icon=new-chat-outline]",
+                "message_textbox": "//div[@title='Type a message']",
+                "attach_button": "//span[@data-icon='attach-menu-plus']",
+                "media_file_input": "//input[@accept='image/*,video/mp4,video/3gpp,video/quicktime']",
+                "media_caption_textbox": "//div[@role='textbox'][contains(@class,'selectable-text')]",
+                "navigation_link": "/html/head/a[@id='whatsappLink']"
+            }
+            log.warning("Using hardcoded fallback selectors due to JSON decode error.")
+        except Exception as e:
+            log.exception(f"Unexpected error loading '{selector_file_path}': {e}")
+            self.selectors = {}
+            log.error("Selectors could not be loaded. Operations will use hardcoded defaults or may fail if defaults not provided in code.")
+
         self.counter_start = counter_start
         self.Numbers = numList
         self.step = step
@@ -159,9 +195,10 @@ class Web(QThread):
 
             log.debug(f"ANALYZ: Waiting for login. Step: {self.step}")
             try:
+                login_selector = self.selectors.get("login_check_element", "*[data-icon=new-chat-outline]")
                 WebDriverWait(self.__driver, 60).until(
                     lambda driver: driver.execute_script(
-                        "return document.querySelector('*[data-icon=new-chat-outline]') !== null;"
+                        f"return document.querySelector('{login_selector}') !== null;"
                     )
                 )
                 log.info("ANALYZ: Login successful.")
@@ -178,11 +215,20 @@ class Web(QThread):
             nf = 0
             for num_idx, num in enumerate(self.Numbers):
                 logtxt = ""
+                nav_link_selector_key = "navigation_link"
+                message_textbox_selector_key = "message_textbox"
                 try:
-                    # time.sleep(random.randint(self.sleepMin, self.sleepMax) if self.sleepMin < self.sleepMax else self.sleepMin) # Moved later
-
                     target_url = f"https.wa.me/{num}"
-                    link_xpath = "/html/head/a[@id='whatsappLink']" # More specific XPath with ID
+                    nav_link_xpath = self.selectors.get(nav_link_selector_key, "/html/head/a[@id='whatsappLink']")
+
+                    if not nav_link_xpath:
+                        log.error(f"{self.step}: Selector key '{nav_link_selector_key}' not found in selectors.json or config is invalid. Number: {num}.")
+                        logtxt = f"Number::{num} => Config error for '{nav_link_selector_key}'."
+                        # Manual finally parts before continue
+                        i += 1; self.lcdNumber_reviewed.emit(i);
+                        if logtxt: self.LogBox.emit(logtxt)
+                        nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                        continue
 
                     if num_idx == 0:
                         execu_create = f"""
@@ -190,24 +236,29 @@ class Web(QThread):
                                 whatsappLink.id = 'whatsappLink';
                                 whatsappLink.href = "{target_url}";
                                 document.head.appendChild(whatsappLink);
-                                // whatsappLink.click(); // Click will be handled by WebDriver explicit wait logic
                                 """
                         self.__driver.execute_script(execu_create)
 
-                    # Wait for and interact with the link
-                    user_element = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
-                        EC.presence_of_element_located((By.XPATH, link_xpath))
+                    user_element = WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
+                        EC.presence_of_element_located((By.XPATH, nav_link_xpath))
                     )
                     self.__driver.execute_script(f"arguments[0].setAttribute('href','{target_url}');", user_element)
                     self.__driver.execute_script("arguments[0].click();", user_element)
 
-                    # Wait for page to indicate invalid number or load chat interface (using previous lambda)
-                    # The lambda wait here is a bit broad, but specific elements for "invalid" are not easily available
-                    WebDriverWait(self.__driver, WAIT_TIMEOUT).until( # Using WAIT_TIMEOUT
+                    message_textbox_xpath_for_check = self.selectors.get(message_textbox_selector_key, '//div[@title="Type a message"]')
+                    if not message_textbox_xpath_for_check:
+                        log.error(f"{self.step}: Selector key '{message_textbox_selector_key}' not found for page check. Number: {num}.")
+                        logtxt = f"Number::{num} => Config error for '{message_textbox_selector_key}'."
+                        i += 1; self.lcdNumber_reviewed.emit(i);
+                        if logtxt: self.LogBox.emit(logtxt)
+                        nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                        continue
+
+                    WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
                         lambda d: "Phone number shared via url is invalid" in d.page_source or \
-                                  d.find_elements(By.XPATH, '//div[@title="Type a message"]') # Check for presence
+                                  d.find_elements(By.XPATH, message_textbox_xpath_for_check)
                     )
-                    time.sleep(1.5) # Reduced sleep, allow page source to update after dynamic content load
+                    time.sleep(1.5)
                     sourceWeb = self.__driver.page_source
 
                     if "Phone number shared via url is invalid" in sourceWeb:
@@ -217,11 +268,8 @@ class Web(QThread):
                         logtxt = f"Number::{num} => Invalid"
                         self.nwa.emit(f"{num}")
                     else:
-                        # Check if chat is actually open (presence of message box)
-                        # Check if chat is actually open (presence of message box)
-                        # This explicit wait for the message box is more reliable
-                        WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
-                            EC.presence_of_element_located((By.XPATH, '//div[@title="Type a message"]'))
+                        WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
+                            EC.presence_of_element_located((By.XPATH, message_textbox_xpath_for_check))
                         )
                         log.info(f"ANALYZ: Number {num} is valid.")
                         f += 1
@@ -229,30 +277,23 @@ class Web(QThread):
                         logtxt = f"Number::{num} => Valid"
                         self.wa.emit(f"{num}")
 
-                    # Pause between processing numbers, consistent with SendTEXT & SendIMG
                     time.sleep(random.randint(self.sleepMin, self.sleepMax) if self.sleepMin < self.sleepMax else self.sleepMin)
 
-                except TimeoutException as e: # More specific Timeout handling for this number
-                    log.error(f"ANALYZ: Timeout error processing number {num}: {e}")
-                    logtxt = f"Number::{num} => Timeout Error!"
+                except TimeoutException as e:
+                    log.error(f"ANALYZ: Timeout waiting for element (e.g. '{nav_link_selector_key}' or '{message_textbox_selector_key}') for number {num}. WhatsApp Web UI may have changed, or the selector in 'selectors.json' may need an update. Details: {e}")
+                    logtxt = f"Number::{num} => Timeout. Check UI/selectors."
                     nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
-                except (NoSuchElementException, StaleElementReferenceException) as e: # Grouped Selenium locators/state errors
-                    log.error(f"ANALYZ: Selenium element error processing number {num}: {e}")
-                    logtxt = f"Number::{num} => Selenium Element Error!"
+                except (NoSuchElementException, StaleElementReferenceException, ElementClickInterceptedException) as e_selenium:
+                    log.error(f"ANALYZ: Selenium error ({type(e_selenium).__name__}) with element (e.g. '{nav_link_selector_key}' or '{message_textbox_selector_key}') for number {num}. WhatsApp Web UI may have changed, or a selector in 'selectors.json' may need an update. Details: {e_selenium}")
+                    logtxt = f"Number::{num} => Error with element. Check UI/selectors."
                     nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
                 except WebDriverException as e:
-                    log.error(f"ANALYZ: WebDriver error processing number {num}: {e}") # Keep this for other WebDriver issues
+                    log.error(f"ANALYZ: WebDriver error processing number {num}: {e}")
                     logtxt = f"Number::{num} => WebDriver Error!"
                     nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
                 except Exception as e:
                     log.exception(f"ANALYZ: Unexpected error processing number {num}: {e}")
                     logtxt = f"Number::{num} => Unexpected Error!"
-                    nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
-                finally:
-                    i += 1
-                    self.lcdNumber_reviewed.emit(i)
-                    if logtxt: # Avoid emitting empty log messages
-                        self.LogBox.emit(logtxt)
 
             analysis_completed_successfully = True # Mark as successful if loop completes
 
@@ -303,9 +344,10 @@ class Web(QThread):
 
             log.debug(f"SendTEXT: Waiting for login. Step: {self.step}")
             try:
+                login_selector = self.selectors.get("login_check_element", "*[data-icon=new-chat-outline]")
                 WebDriverWait(self.__driver, 60).until(
                     lambda driver: driver.execute_script(
-                        "return document.querySelector('*[data-icon=new-chat-outline]') !== null;"
+                        f"return document.querySelector('{login_selector}') !== null;"
                     )
                 )
                 log.info("SendTEXT: Login successful.")
@@ -322,9 +364,19 @@ class Web(QThread):
             log.debug(f"SendTEXT: Processing numbers: {self.Numbers}")
             for num_idx, num in enumerate(self.Numbers):
                 logtxt = ""
+                nav_link_selector_key = "navigation_link"
+                message_textbox_selector_key = "message_textbox"
                 try:
                     target_url = f"https.wa.me/{num}"
-                    link_xpath = "/html/head/a[@id='whatsappLink']"
+                    nav_link_xpath = self.selectors.get(nav_link_selector_key, "/html/head/a[@id='whatsappLink']")
+
+                    if not nav_link_xpath:
+                        log.error(f"{self.step}: Selector key '{nav_link_selector_key}' not found in selectors.json or config is invalid. Number: {num}.")
+                        logtxt = f"Number::{num} => Config error for '{nav_link_selector_key}'."
+                        i += 1; self.lcdNumber_reviewed.emit(i);
+                        if logtxt: self.LogBox.emit(logtxt)
+                        nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                        continue
 
                     if num_idx == 0:
                         execu_create = f"""
@@ -335,17 +387,26 @@ class Web(QThread):
                                 """
                         self.__driver.execute_script(execu_create)
 
-                    user_element = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
-                        EC.presence_of_element_located((By.XPATH, link_xpath))
+                    user_element = WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
+                        EC.presence_of_element_located((By.XPATH, nav_link_xpath))
                     )
                     self.__driver.execute_script(f"arguments[0].setAttribute('href','{target_url}');", user_element)
                     self.__driver.execute_script("arguments[0].click();", user_element)
 
-                    WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                    message_textbox_xpath_for_check = self.selectors.get(message_textbox_selector_key, "//div[@data-testid='compose-box']//div[@role='textbox'][@aria-label='Type a message']")
+                    if not message_textbox_xpath_for_check:
+                        log.error(f"{self.step}: Selector key '{message_textbox_selector_key}' not found for page check. Number: {num}.")
+                        logtxt = f"Number::{num} => Config error for '{message_textbox_selector_key}'."
+                        i += 1; self.lcdNumber_reviewed.emit(i);
+                        if logtxt: self.LogBox.emit(logtxt)
+                        nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                        continue
+
+                    WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
                         lambda d: "Phone number shared via url is invalid" in d.page_source or \
-                                  d.find_elements(By.XPATH, '//div[@title="Type a message"]')
+                                  d.find_elements(By.XPATH, message_textbox_xpath_for_check)
                     )
-                    time.sleep(1.5) # Reduced sleep
+                    time.sleep(1.5)
                     sourceWeb = self.__driver.page_source
 
                     if "Phone number shared via url is invalid" in sourceWeb:
@@ -356,11 +417,21 @@ class Web(QThread):
                         self.nwa.emit(f"{num}")
                     else:
                         log.info(f"SendTEXT: Number {num} is valid. Attempting to send message.")
-                        textBox = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
-                            EC.element_to_be_clickable((By.XPATH, '//div[@title="Type a message"]')) # Ensure clickable
+
+                        # This is the same key as message_textbox_xpath_for_check, but re-get for clarity or if it could differ
+                        actual_message_textbox_xpath = self.selectors.get(message_textbox_selector_key, "//div[@data-testid='compose-box']//div[@role='textbox'][@aria-label='Type a message']")
+                        if not actual_message_textbox_xpath:
+                             log.error(f"{self.step}: Selector key '{message_textbox_selector_key}' for sending message not found. Number: {num}.")
+                             logtxt = f"Number::{num} => Config error for send textbox '{message_textbox_selector_key}'."
+                             i += 1; self.lcdNumber_reviewed.emit(i);
+                             if logtxt: self.LogBox.emit(logtxt)
+                             nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                             continue
+
+                        textBox = WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
+                            EC.element_to_be_clickable((By.XPATH, actual_message_textbox_xpath))
                         )
-                        # self.copyToClipboard(self.text) # Done outside try block if it doesn't involve driver
-                        textBox.send_keys(Keys.CONTROL, 'v') # Consider sending char by char if this fails
+                        textBox.send_keys(Keys.CONTROL, 'v')
                         time.sleep(0.5)
                         textBox.send_keys(Keys.RETURN)
                         time.sleep(1)
@@ -372,13 +443,13 @@ class Web(QThread):
 
                     time.sleep(random.randint(self.sleepMin, self.sleepMax) if self.sleepMin < self.sleepMax else self.sleepMin)
 
-                except TimeoutException as e: # Specific to this number's operations
-                    log.error(f"SendTEXT: Timeout error for number {num}: {e}")
-                    logtxt = f"Number::{num} => Timeout Error (No Send)!"
+                except TimeoutException as e:
+                    log.error(f"SendTEXT: Timeout waiting for element (e.g. '{nav_link_selector_key}' or '{message_textbox_selector_key}') for number {num}. WhatsApp Web UI may have changed, or the selector in 'selectors.json' may need an update. Details: {e}")
+                    logtxt = f"Number::{num} => Timeout. Check UI/selectors."
                     nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
-                except (NoSuchElementException, StaleElementReferenceException, ElementClickInterceptedException) as e:
-                    log.error(f"SendTEXT: Selenium element error for number {num}: {e}")
-                    logtxt = f"Number::{num} => Selenium Error (No Send)!"
+                except (NoSuchElementException, StaleElementReferenceException, ElementClickInterceptedException) as e_selenium:
+                    log.error(f"SendTEXT: Selenium error ({type(e_selenium).__name__}) with element (e.g. '{nav_link_selector_key}' or '{message_textbox_selector_key}') for number {num}. WhatsApp Web UI may have changed, or a selector in 'selectors.json' may need an update. Details: {e_selenium}")
+                    logtxt = f"Number::{num} => Error with element. Check UI/selectors."
                     nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
                 except WebDriverException as e:
                     log.error(f"SendTEXT: WebDriver error for number {num}: {e}")
@@ -441,9 +512,10 @@ class Web(QThread):
 
             log.debug(f"SendIMG: Waiting for login. Step: {self.step}")
             try:
+                login_selector = self.selectors.get("login_check_element", "*[data-icon=new-chat-outline]")
                 WebDriverWait(self.__driver, 60).until(
                     lambda driver: driver.execute_script(
-                        "return document.querySelector('*[data-icon=new-chat-outline]') !== null;"
+                        f"return document.querySelector('{login_selector}') !== null;"
                     )
                 )
                 log.info("SendIMG: Login successful.")
@@ -460,9 +532,22 @@ class Web(QThread):
             log.debug(f"SendIMG: Processing numbers: {self.Numbers}")
             for num_idx, num in enumerate(self.Numbers):
                 logtxt = ""
+                nav_link_selector_key = "navigation_link"
+                message_textbox_selector_key = "message_textbox" # For page check
+                attach_button_selector_key = "attach_button"
+                media_file_input_selector_key = "media_file_input"
+                media_caption_textbox_selector_key = "media_caption_textbox"
                 try:
                     target_url = f"https.wa.me/{num}"
-                    link_xpath = "/html/head/a[@id='whatsappLink']"
+                    nav_link_xpath = self.selectors.get(nav_link_selector_key, "/html/head/a[@id='whatsappLink']")
+
+                    if not nav_link_xpath:
+                        log.error(f"{self.step}: Selector key '{nav_link_selector_key}' not found. Number: {num}.")
+                        logtxt = f"Number::{num} => Config error for '{nav_link_selector_key}'."
+                        i += 1; self.lcdNumber_reviewed.emit(i);
+                        if logtxt: self.LogBox.emit(logtxt)
+                        nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                        continue
 
                     if num_idx == 0:
                         execu_create = f"""
@@ -473,17 +558,26 @@ class Web(QThread):
                                 """
                         self.__driver.execute_script(execu_create)
 
-                    user_element = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
-                        EC.presence_of_element_located((By.XPATH, link_xpath))
+                    user_element = WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
+                        EC.presence_of_element_located((By.XPATH, nav_link_xpath))
                     )
                     self.__driver.execute_script(f"arguments[0].setAttribute('href','{target_url}');", user_element)
                     self.__driver.execute_script("arguments[0].click();", user_element)
 
-                    WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                    message_textbox_xpath_for_check = self.selectors.get(message_textbox_selector_key, '//div[@title="Type a message"]')
+                    if not message_textbox_xpath_for_check:
+                        log.error(f"{self.step}: Selector key '{message_textbox_selector_key}' not found for page check. Number: {num}.")
+                        logtxt = f"Number::{num} => Config error for '{message_textbox_selector_key}'."
+                        i += 1; self.lcdNumber_reviewed.emit(i);
+                        if logtxt: self.LogBox.emit(logtxt)
+                        nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                        continue
+
+                    WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
                         lambda d: "Phone number shared via url is invalid" in d.page_source or \
-                                  d.find_elements(By.XPATH, '//div[@title="Type a message"]')
+                                  d.find_elements(By.XPATH, message_textbox_xpath_for_check)
                     )
-                    time.sleep(1.5) # Reduced sleep
+                    time.sleep(1.5)
                     sourceWeb = self.__driver.page_source
 
                     if "Phone number shared via url is invalid" in sourceWeb:
@@ -494,26 +588,46 @@ class Web(QThread):
                         self.nwa.emit(f"{num}")
                     else:
                         log.info(f"SendIMG: Number {num} is valid. Attempting to send image.")
-                        attach_button = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
-                            EC.element_to_be_clickable((By.XPATH, '//span[@data-icon="attach-menu-plus"]'))
+
+                        attach_button_xpath = self.selectors.get(attach_button_selector_key, "//button[@aria-label='Attach' or @aria-label='Attach file']//span[@data-icon='attach-menu-plus']")
+                        if not attach_button_xpath:
+                            log.error(f"{self.step}: Selector key '{attach_button_selector_key}' not found. Number: {num}.")
+                            logtxt = f"Number::{num} => Config error for '{attach_button_selector_key}'."
+                            i += 1; self.lcdNumber_reviewed.emit(i);
+                            if logtxt: self.LogBox.emit(logtxt)
+                            nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                            continue
+                        attach_button = WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
+                            EC.element_to_be_clickable((By.XPATH, attach_button_xpath))
                         )
                         attach_button.click()
 
-                        file_input_xpath = '//input[@accept="image/*,video/mp4,video/3gpp,video/quicktime"]'
-                        file_input = WebDriverWait(self.__driver, WAIT_TIMEOUT).until(
+                        file_input_xpath = self.selectors.get(media_file_input_selector_key, "//input[@type='file'][@accept='image/*,video/mp4,video/3gpp,video/quicktime']")
+                        if not file_input_xpath:
+                            log.error(f"{self.step}: Selector key '{media_file_input_selector_key}' not found. Number: {num}.")
+                            logtxt = f"Number::{num} => Config error for '{media_file_input_selector_key}'."
+                            i += 1; self.lcdNumber_reviewed.emit(i);
+                            if logtxt: self.LogBox.emit(logtxt)
+                            nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                            continue
+                        file_input = WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
                             EC.presence_of_element_located((By.XPATH, file_input_xpath))
                         )
                         file_input.send_keys(self.path)
 
-                        # Adjusted XPath for caption box, often it's a div with role="textbox"
-                        # This might need further refinement based on actual WhatsApp Web structure during image send
-                        caption_textbox_xpath = '//div[@role="textbox"][contains(@class,"selectable-text")]'
-                        caption_textbox = WebDriverWait(self.__driver, WAIT_TIMEOUT).until( # Increased wait for upload
+                        caption_textbox_xpath = self.selectors.get(media_caption_textbox_selector_key, "//div[@data-testid='media-preview-caption-input']//div[@role='textbox']")
+                        if not caption_textbox_xpath:
+                            log.error(f"{self.step}: Selector key '{media_caption_textbox_selector_key}' not found. Number: {num}.")
+                            logtxt = f"Number::{num} => Config error for '{media_caption_textbox_selector_key}'."
+                            i += 1; self.lcdNumber_reviewed.emit(i);
+                            if logtxt: self.LogBox.emit(logtxt)
+                            nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
+                            continue
+                        caption_textbox = WebDriverWait(self.__driver, self.WAIT_TIMEOUT).until(
                             EC.element_to_be_clickable((By.XPATH, caption_textbox_xpath))
                         )
 
                         if self.text.strip():
-                            # self.copyToClipboard(self.text) # Done outside try block if it doesn't involve driver
                             caption_textbox.send_keys(Keys.CONTROL, 'v')
                             time.sleep(0.5)
 
@@ -527,13 +641,15 @@ class Web(QThread):
 
                     time.sleep(random.randint(self.sleepMin, self.sleepMax) if self.sleepMin < self.sleepMax else self.sleepMin)
 
-                except TimeoutException as e: # Specific to this number's operations
-                    log.error(f"SendIMG: Timeout error for image to {num}: {e}")
-                    logtxt = f"Number::{num} => Timeout Error (No Send)!"
+                except TimeoutException as e:
+                    log.error(f"SendIMG: Timeout waiting for element (e.g. '{nav_link_selector_key}', '{attach_button_selector_key}', etc.) for number {num}. WhatsApp Web UI may have changed, or a selector in 'selectors.json' may need an update. Details: {e}")
+                    logtxt = f"Number::{num} => Timeout. Check UI/selectors."
                     nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
-                except (NoSuchElementException, StaleElementReferenceException, ElementClickInterceptedException) as e:
-                    log.error(f"SendIMG: Selenium element error for image to {num}: {e}")
-                    logtxt = f"Number::{num} => Selenium Error (No Send)!"
+                except (NoSuchElementException, StaleElementReferenceException, ElementClickInterceptedException) as e_selenium:
+                    # Selector key in log message will be the last one assigned if multiple were used.
+                    current_selector_key = caption_textbox_selector_key # Or the last one attempted.
+                    log.error(f"SendIMG: Selenium error ({type(e_selenium).__name__}) with element '{current_selector_key}' for number {num}. WhatsApp Web UI may have changed, or the selector in 'selectors.json' may need an update. Details: {e_selenium}")
+                    logtxt = f"Number::{num} => Error with element '{current_selector_key}'. Check UI/selectors."
                     nf += 1; self.lcdNumber_nwa.emit(nf); self.nwa.emit(f"{num}")
                 except WebDriverException as e:
                     log.error(f"SendIMG: WebDriver error for image to {num}: {e}")

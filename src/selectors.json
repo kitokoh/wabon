@@ -1,0 +1,8 @@
+{
+    "login_check_element": "*[data-icon=new-chat-outline]",
+    "message_textbox": "//div[@data-testid='compose-box']//div[@role='textbox'][@aria-label='Type a message']",
+    "attach_button": "//button[@aria-label='Attach' or @aria-label='Attach file']//span[@data-icon='attach-menu-plus']",
+    "media_file_input": "//input[@type='file'][@accept='image/*,video/mp4,video/3gpp,video/quicktime']",
+    "media_caption_textbox": "//div[@data-testid='media-preview-caption-input']//div[@role='textbox']",
+    "navigation_link": "/html/head/a[@id='whatsappLink']"
+}

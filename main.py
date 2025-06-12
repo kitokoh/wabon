@@ -39,7 +39,32 @@ class Main():
             log.error(f"Failed to start 'insert' NetWork thread: {e}")
             # Decide if this is critical enough to stop app init
         # self.insert.Checker.connect(self.qthreadInsert) # This was commented out
-        self.userChck() # Updated to handle errors
+
+        #Translations loading must happen before userChck if msgError in userChck uses self.ln
+        translations_path = os.path.join(".", "src", "lang", "translations.json")
+        try:
+            with open(translations_path, "r", encoding="utf8") as f:
+                self.lang = json.load(f)
+            log.info(f"Translations loaded successfully from {translations_path}")
+        except FileNotFoundError:
+            log.error(f"{translations_path} not found. Application will use a basic English fallback.")
+            self.lang = {
+                "translatables": {
+                    "msgerr_ok": {"English": "OK"},
+                    "app_name_lbl": {"English": "WA Sender"},
+                    "user_check_thread_err": {"English": "Could not initialize user status check. Some features might be limited."}
+                    # Add other critical keys needed before full languageSet
+                }, "languages": ["English"] }
+        except json.JSONDecodeError as e:
+            log.error(f"Error decoding {translations_path}: {e}. Using basic English fallback.")
+            self.lang = { "translatables": { "msgerr_ok": {"English": "OK"}}, "languages": ["English"] }
+        except OSError as e:
+            log.error(f"OSError reading {translations_path}: {e}. Using basic English fallback.")
+            self.lang = { "translatables": { "msgerr_ok": {"English": "OK"}}, "languages": ["English"] }
+
+        self.ln = self.lang.get("translatables", {})
+
+        self.userChck() # Now safe to call as self.ln is initialized for msgError
 
         self.MainWindow = myQMainWindow()
         self.ui = Ui_MainWindow()
@@ -53,7 +78,6 @@ class Main():
         except OSError as e:
             log.error(f"Could not create 'temp' directory: {e}")
             # This could be critical, an early msgError or sys.exit might be needed if 'temp' is essential.
-            # For now, we'll let it proceed and potentially fail later if dbPath can't be established.
 
         # Font Loading
         font_db2 = QFontDatabase()
@@ -65,49 +89,28 @@ class Main():
             font_families = QFontDatabase.applicationFontFamilies(font_id2)
             if font_families:
                 log.debug(f"Successfully loaded application font: {font_path}. Families: {font_families}")
-            else: # Should not happen if font_id2 is valid, but good for robustness
+            else:
                 log.warning(f"Loaded application font {font_path} but no families found.")
-        # QFontDatabase.applicationFontFamilies(font_id2) # This line was fine, but result can be used for log
 
-        # Translations Loading
-        translations_path = os.path.join(".", "src", "lang", "translations.json")
-        try:
-            with open(translations_path, "r", encoding="utf8") as f:
-                self.lang = json.load(f)
-            log.info(f"Translations loaded successfully from {translations_path}")
-        except FileNotFoundError:
-            log.error(f"{translations_path} not found. Application will use a basic English fallback.")
-            self.lang = { # Basic fallback structure
-                "translatables": { "msgerr_ok": {"English": "OK"}, # Essential for msgError
-                                   "app_name_lbl": {"English": "WA Sender"} # Example for window title
-                                 }, "languages": ["English"] }
-            # A more comprehensive fallback would list all keys used in languageSet to prevent KeyErrors
-            # For now, languageSet's try-except blocks will handle individual missing keys.
-        except json.JSONDecodeError as e:
-            log.error(f"Error decoding {translations_path}: {e}. Using basic English fallback.")
-            self.lang = { "translatables": { "msgerr_ok": {"English": "OK"}}, "languages": ["English"] }
-        except OSError as e:
-            log.error(f"OSError reading {translations_path}: {e}. Using basic English fallback.")
-            self.lang = { "translatables": { "msgerr_ok": {"English": "OK"}}, "languages": ["English"] }
-
-        self.ln = self.lang.get("translatables", {})
-
-        # languageConf must be called AFTER self.lang is initialized
+        # Call languageConf to populate self.ui.langs AFTER self.lang and self.ln are set.
         self.languageConf()
 
         # Initialize self.cln (current language name)
         if self.ui.langs.count() > 0:
             self.cln = self.ui.langs.currentText()
-            if not self.cln and self.lang.get("languages"): # If currentText is somehow empty initially
+            if not self.cln and self.lang.get("languages"):
                 self.cln = self.lang["languages"][0]
-                self.ui.langs.setCurrentText(self.cln) # Try to set it in UI too
-            elif not self.cln: # Ultimate fallback for self.cln
+                self.ui.langs.setCurrentText(self.cln)
+            elif not self.cln:
                  self.cln = "English"
         elif self.lang.get("languages"):
             self.cln = self.lang["languages"][0]
         else:
-            self.cln = "English" # Should not happen if fallback self.lang is correct
+            self.cln = "English"
         log.info(f"Initial language set to: {self.cln}")
+
+        # Now call languageSet as self.cln is determined and UI elements are available
+        self.languageSet() # Moved later
 
         self.dbPath = os.path.join("temp", "temporary.data")
         self.reviewedCount = 0
@@ -265,7 +268,7 @@ class Main():
         # except Exception as e:
         #     log.exception(f"Error in self.frOM.retranslateUi: {e}")
 
-    def userChck(self):
+    def userChck(self): # Original position, called from __init__
         try:
             log.debug("Setting up user status check thread.")
             self.userStatus = NetWork(step=2, user=self.__LICENS__)
@@ -273,36 +276,35 @@ class Main():
             self.userStatus.Checker.connect(self.userChecker)
         except Exception as e:
             log.exception(f"Error during userChck setup or thread start: {e}")
-            self.User = False # Assume user check failed if setup fails
-            # Ensure self.ln and self.cln are available for msgError, even if translations failed.
+            self.User = False
             error_msg_key = "user_check_thread_err"
             default_err_msg = "Could not initialize user status check. Some features might be limited."
+            # self.ln might not be fully populated if translations failed before languageSet,
+            # but basic keys like msgerr_ok should be there from fallback.
             msg_to_show = self.ln.get(error_msg_key, {}).get(self.cln, default_err_msg)
             self.msgError(msg_to_show)
 
 
-    def checkVer(self, value):
+    def checkVer(self, value): # Original position
         try:
             if value and isinstance(value, (list, tuple)) and len(value) >= 1:
                 if value[0] != "last version":
                     ver = value[0]
-                    link = value[1] if len(value) > 1 else "#" # Default link if missing
-                    # Ensure self.ln and self.cln are available for msgError
+                    link = value[1] if len(value) > 1 else "#"
                     update_msg1_key = "update_available_msg1"
                     update_msg2_key = "update_available_msg2"
                     download_lbl_key = "download_lbl"
 
-                    default_msg1 = f"New version ({ver}) is available."
-                    default_msg2 = "Please download and install it."
-                    default_download = "Download"
+                    default_msg1 = f"New version ({ver}) is available." # Fallback text
+                    default_msg2 = "Please download and install it."   # Fallback text
+                    default_download = "Download"                       # Fallback text
 
                     msg1 = self.ln.get(update_msg1_key, {}).get(self.cln, default_msg1)
                     msg2 = self.ln.get(update_msg2_key, {}).get(self.cln, default_msg2)
                     download_text = self.ln.get(download_lbl_key, {}).get(self.cln, default_download)
 
                     self.msgError(
-                        fr"""<html><head/><body><p align="center">{msg1}</p><p align="center">{msg2} <a href="{
-                            link}"><span style=" text-decoration: underline; color:#0000ff;">{download_text}</span></a></p></body></html>""",
+                        fr"""<html><head/><body><p align="center">{msg1}</p><p align="center">{msg2} <a href="{link}"><span style=" text-decoration: underline; color:#0000ff;">{download_text}</span></a></p></body></html>""",
                         colorf="#034a0d")
                 else:
                     log.info("Application is up to date.")
@@ -1276,17 +1278,17 @@ class Main():
 
     def initImport(self):
         try:
-            if self.cv == 0: # cv is a counter, presumably to run this once
+            if self.cv == 0:
                 self.cv = 1
                 log.debug("Setting up application version check thread.")
                 self.checkVERSION = NetWork(step=1, version=self.__VERSION__)
                 self.checkVERSION.start()
-                self.checkVERSION.cuurentVersion.connect(self.checkVer) # checkVer is now error-handled
+                self.checkVERSION.cuurentVersion.connect(self.checkVer)
         except Exception as e:
             log.exception(f"Error starting version check thread in initImport: {e}")
-            # Potentially inform user or proceed without version check if non-critical
+            # Not showing msgError here as it might be too early or spammy during init.
 
-        from importNumber import Ui_Form # Keep UI setup outside try-except if it's standard Qt setup
+        from importNumber import Ui_Form
         self.fi = Ui_Form()
         self.formQImport1 = QDialog()
         self.formQImport1.setModal(True)
@@ -1374,8 +1376,7 @@ class Main():
         self.formQImport.setWindowFlags(self.formQImport.windowFlags() | Qt.FramelessWindowHint)
         self.formQImport.setAttribute(Qt.WA_TranslucentBackground)
         self.fia.setupUi(self.formQImport)
-        icon = QIcon() # Assuming icons_rc is correctly imported and resources are available
-        icon.addPixmap(QPixmap(":/main/icon.ico"), QIcon.Normal, QIcon.Off) # Assuming icons_rc is fine
+        icon.addPixmap(QPixmap(":/main/icon.ico"), QIcon.Normal, QIcon.Off)
         self.formQImport.setWindowIcon(icon)
         self.fia.btn_import_cancel.clicked.connect(self.formQImport.close)
 
@@ -1383,17 +1384,15 @@ class Main():
         try:
             os.makedirs(cache_dir, exist_ok=True)
             log.debug(f"Ensured cache directory exists: {cache_dir}")
-            cacheList = os.listdir(cache_dir) # This might fail if cache_dir is not readable
+            cacheList = os.listdir(cache_dir)
             log.debug(f"Cache list: {cacheList}")
         except OSError as e:
             log.error(f"Failed to create or list cache directory {cache_dir}: {e}")
-            # Provide a default for cache_dir_err if not in self.ln
-            default_cache_err_msg = "Error accessing account cache. Account features might be affected."
-            err_msg_key = "cache_dir_err"
-            # Safely get the error message from translations or use default
-            final_err_msg = self.ln.get(err_msg_key, {}).get(self.cln, default_cache_err_msg)
-            self.msgError(f"{final_err_msg}: {cache_dir}")
-            cacheList = [] # Use empty list if dir cannot be accessed/created
+            default_cache_err_msg = "Error accessing account cache. Account features might be affected." # Fallback
+            error_key = "cache_dir_err" # Assumed key in self.ln
+            msg_to_display = self.ln.get(error_key, {}).get(self.cln, default_cache_err_msg)
+            self.msgError(f"{msg_to_display}: {cache_dir}")
+            cacheList = []
 
         self.modelAcc = TableModel(cacheList)
         self.fia.accountsTable.setModel(self.modelAcc)
