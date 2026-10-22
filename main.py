@@ -1065,47 +1065,46 @@ class Main():
                         return
 
                     currentIndex = self.ui.start_tab.currentIndex()
-                        if currentIndex == 0:
+                    if currentIndex == 0:
+                        self.btnStatus()
+                        self.ui.LogBox.appendPlainText(fr"-- Start analysis --")
+                        self.AnalyzNum()
+                    elif currentIndex == 1:
+                        log.debug("message Tab")
+                        text = self.ui.textMSG.toPlainText()
+                        log.debug(text)
+                        if text != '':
                             self.btnStatus()
-                            self.ui.LogBox.appendPlainText(fr"-- Start analysis --")
-                            self.AnalyzNum()
-                        elif currentIndex == 1:
-                            log.debug("message Tab")
-                            text = self.ui.textMSG.toPlainText()
-                            log.debug(text)
-                            if text != '':
-                                self.btnStatus()
-                                self.ui.LogBox.appendPlainText(fr"-- Start Send Message --")
-                                self.sendMsg(text)
-                            else:
-                                self.msgError(self.ln["inputxt_err"][self.cln])
-                        elif currentIndex == 2:
-                            log.debug('image tab')
-                            if self.p != '':
-                                caption = self.ui.caption.toPlainText()
-                                self.ui.LogBox.appendPlainText(fr"-- Start Send Image --")
-                                self.sendImg(path=self.p, caption=caption)
-                                self.btnStatus()
-                            else:
-                                self.msgError(self.ln["inputimg_err"][self.cln])
+                            self.ui.LogBox.appendPlainText(fr"-- Start Send Message --")
+                            self.sendMsg(text)
                         else:
-                            self.msgError()
-                        if not self.RememberLogin:
-                            lisT = os.listdir('temp')
-                            import shutil
-                            for f in lisT:
-                                try:
-                                    if f == 'temporary.data':
-                                        continue
-                                    os.remove(fr"temp/{f}")
-                                except:
-                                    try:
-                                        os.rmdir(fr"temp/{f}")
-                                    except:
-                                        shutil.rmtree(fr"temp/{f}")
-                                        continue
-                                    continue
+                            self.msgError(self.ln["inputxt_err"][self.cln])
+                    elif currentIndex == 2:
+                        log.debug('image tab')
+                        if self.p != '':
+                            caption = self.ui.caption.toPlainText()
+                            self.ui.LogBox.appendPlainText(fr"-- Start Send Image --")
+                            self.sendImg(path=self.p, caption=caption)
+                            self.btnStatus()
+                        else:
+                            self.msgError(self.ln["inputimg_err"][self.cln])
                     else:
+                        self.msgError()
+                    if not self.RememberLogin:
+                        lisT = os.listdir('temp')
+                        import shutil
+                        for f in lisT:
+                            try:
+                                if f == 'temporary.data':
+                                    continue
+                                os.remove(fr"temp/{f}")
+                            except:
+                                try:
+                                    os.rmdir(fr"temp/{f}")
+                                except:
+                                    shutil.rmtree(fr"temp/{f}")
+                                    continue
+                                continue
                     self.msgError(self.ln["per_err"][self.cln], colorf='#1b6900') # Assuming User check failed
                 else: # Net is False
                     self.msgError(self.ln["net_err"][self.cln]) # Network connection failed
